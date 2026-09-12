@@ -79,6 +79,7 @@ async def chat_completion(messages: list[dict]) -> str:
         "model": TEXT_MODEL,
         "messages": [{"role": "system", "content": SYSTEM_PROMPT}] + messages,
         "temperature": 0.7,
+        "stream": False,  # !! Явно отключаем стрим
     }
     
     try:
@@ -86,14 +87,36 @@ async def chat_completion(messages: list[dict]) -> str:
             async with session.post(
                 f"{API_BASE}/chat/completions", headers=headers, json=payload
             ) as resp:
-                data = await resp.json()
-                logger.info(f"Статус ответа: {resp.status}")
-                if resp.status != 200:
-                    logger.error(f"Ошибка API: {data}")
-                    raise RuntimeError(data.get("error", data))
-                result = data["choices"][0]["message"]["content"]
-                logger.info(f"Получен ответ от модели: {result[:100]}...")
-                return result
+                # ВАЖНО: Проверяем Content-Type перед чтением
+                content_type = resp.headers.get("Content-Type", "")
+                if "text/event-stream" in content_type:
+                    # Если стрим — соберём текст из потока
+                    full_response = ""
+                    async for line in resp.content:
+                        line = line.decode("utf-8").strip()
+                        if line.startswith("data:"):
+                            data = line[5:].strip()
+                            if data == "[DONE]":
+                                break
+                            try:
+                                chunk = json.loads(data)
+                                delta = chunk.get("choices", [{}])[0].get("delta", {})
+                                content = delta.get("content", "")
+                                full_response += content
+                            except:
+                                continue
+                    logger.info(f"Собранный ответ из потока: {full_response[:100]}...")
+                    return full_response
+                else:
+                    # Если обычный JSON
+                    data = await resp.json()
+                    logger.info(f"Статус ответа: {resp.status}")
+                    if resp.status != 200:
+                        logger.error(f"Ошибка API: {data}")
+                        raise RuntimeError(data.get("error", data))
+                    result = data["choices"][0]["message"]["content"]
+                    logger.info(f"Получен ответ от модели: {result[:100]}...")
+                    return result
     except Exception as e:
         logger.error(f"Ошибка при выполнении запроса к API: {e}")
         raise
