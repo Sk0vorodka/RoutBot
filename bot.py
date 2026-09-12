@@ -13,6 +13,8 @@ from telegram.ext import (
     ContextTypes,
 )
 from dotenv import load_dotenv
+from telegram import ChatActionSender
+from telegram.constants import ChatAction
 
 load_dotenv()
 
@@ -284,8 +286,8 @@ async def handle_private(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not message or not message.text:
         return
 
-    async with context.bot.send_chat_action(
-        chat_id=message.chat_id, action=ChatAction.TYPING
+    async with ChatActionSender(
+        action=ChatAction.TYPING, chat_id=message.chat_id, bot=context.bot
     ):
         await process_request(
             [{"role": "user", "content": build_user_content(message)}],
@@ -303,8 +305,8 @@ async def handle_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_route_mentioned(message.text, bot_username):
         return
 
-    async with context.bot.send_chat_action(
-        chat_id=message.chat_id, action=ChatAction.TYPING
+    async with ChatActionSender(
+        action=ChatAction.TYPING, chat_id=message.chat_id, bot=context.bot
     ):
         await process_request(
             [{"role": "user", "content": build_user_content(message)}],
