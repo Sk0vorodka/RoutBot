@@ -3,10 +3,8 @@ import os
 import re
 import json
 import logging
-import traceback
-import asyncio
-import aiohttp
 import subprocess
+import aiohttp
 from telegram import Update
 from telegram.constants import ChatAction
 from telegram.ext import (
@@ -149,16 +147,16 @@ def quoted_content(msg) -> str:
 
 async def do_request(messages, msg, reply=False):
     async def send(text=None, image_url=None, cap=None):
-        kw = {"reply_to_message_id": msg.message_id} if reply else {}
+        kwargs = {"reply_to_message_id": msg.message_id} if reply else {}
 
         try:
             if image_url:
-                await msg.reply_photo(photo=image_url, caption=cap or "", **kw)
+                await msg.reply_photo(photo=image_url, caption=cap or "", **kwargs)
             else:
-                await msg.reply_text(text or "...", **kw)
+                await msg.reply_text(text or "...", **kwargs)
         except Exception:
-            fb = f"Готово: {image_url}" + (("\n\n" + cap) if cap else "")
-            await msg.reply_text(fb[:1000], **kw)
+            fallback_text = f"Готово: {image_url}" + (("\n\n" + cap) if cap else "")
+            await msg.reply_text(fallback_text[:1000], **kwargs)
 
     bot = msg.get_bot()
     await bot.send_chat_action(chat_id=msg.chat_id, action=ChatAction.TYPING)
@@ -171,10 +169,11 @@ async def do_request(messages, msg, reply=False):
             await send(text=answer)
             return
 
-        st = await msg.reply_text("Генерирую фото...", **kw)
+        st = await msg.reply_text("Генерирую фото...", reply_to_message_id=msg.message_id if reply else None)
         await bot.send_chat_action(chat_id=msg.chat_id, action=ChatAction.UPLOAD_PHOTO)
         url = await generate_image(prm)
 
+        # Подпись
         cprm = "Напиши короткий коммент на русском"
         crsp = await chat_completion(messages + [
             {"role": "assistant", "content": answer},
@@ -186,8 +185,9 @@ async def do_request(messages, msg, reply=False):
         await st.delete()
 
     except Exception as e:
-        logger.error(f"Ошибка при обработке: {e}", exc_info=True)
-        await msg.reply_text("Ошибка. Попробуй позже.", **kw)
+        logger.error(f"do_request ошибка: {e}", exc_info=True)
+        kwargs = {"reply_to_message_id": msg.message_id} if reply else {}
+        await msg.reply_text("Ошибка. Попробуй позже.", **kwargs)
 
 
 # ---------- Хендлеры ----------
@@ -198,9 +198,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def logs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
-        r = subprocess.run(["tail", "-n", "20", "bot.log"], capture_output=True, text=True)
-        t = r.stdout or "пусто"
-        await update.message.reply_text(f"```\n{t[-3000:]}\n```", parse_mode="Markdown")
+        await update.message.reply_document(document=open("bot.log", "rb"))
     except Exception as e:
         await update.message.reply_text(f"❌ Ошибка: {e}")
 
