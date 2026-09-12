@@ -13,10 +13,6 @@ from telegram.ext import (
     ContextTypes,
 )
 from dotenv import load_dotenv
-from telegram import ChatActionSender
-from telegram.constants import ChatAction
-from telegram import Update, ChatActionSender
-from telegram.constants import ChatAction
 
 load_dotenv()
 
@@ -231,20 +227,19 @@ async def process_request(messages: list, message, reply: bool):
     bot = message.get_bot()
 
     # --- Этап 1: ИИ решает, что делать ---
-    async with ChatActionSender(
-        action=ChatAction.TYPING, chat_id=message.chat_id, bot=bot
-    ):
-        response = await chat_completion(messages, tools=TOOLS, tool_choice="auto")
-        assistant_message = response["choices"][0]["message"]
+    await bot.send_chat_action(chat_id=message.chat_id, action=ChatAction.TYPING)
 
-        # Обычный текстовый ответ
-        if not assistant_message.get("tool_calls"):
-            await send(text=assistant_message.get("content", "..."))
-            return
+    response = await chat_completion(messages, tools=TOOLS, tool_choice="auto")
+    assistant_message = response["choices"][0]["message"]
 
-        tool_call = assistant_message["tool_calls"][0]
-        function_name = tool_call["function"]["name"]
-        arguments = json.loads(tool_call["function"]["arguments"])
+    # Обычный текстовый ответ
+    if not assistant_message.get("tool_calls"):
+        await send(text=assistant_message.get("content", "..."))
+        return
+
+    tool_call = assistant_message["tool_calls"][0]
+    function_name = tool_call["function"]["name"]
+    arguments = json.loads(tool_call["function"]["arguments"])
 
     # --- Этап 2: Генерация медиа ---
     if function_name == "generate_image":
@@ -264,31 +259,29 @@ async def process_request(messages: list, message, reply: bool):
         reply_to_message_id=message.message_id if reply else None
     )
 
-    async with ChatActionSender(
-        action=action, chat_id=message.chat_id, bot=bot
-    ):
-        if media_type == "image":
-            media_url = await generate_image(**arguments)
-        else:
-            media_url = await generate_video(**arguments)
+    await bot.send_chat_action(chat_id=message.chat_id, action=action)
+
+    if media_type == "image":
+        media_url = await generate_image(**arguments)
+    else:
+        media_url = await generate_video(**arguments)
 
     # --- Этап 3: ИИ пишет подпись к результату ---
-    async with ChatActionSender(
-        action=ChatAction.TYPING, chat_id=message.chat_id, bot=bot
-    ):
-        messages.append(assistant_message)
-        messages.append(
-            {
-                "role": "tool",
-                "tool_call_id": tool_call["id"],
-                "name": function_name,
-                "content": json.dumps(
-                    {"url": media_url, "prompt": arguments.get("prompt", "")}
-                ),
-            }
-        )
-        final_response = await chat_completion(messages)
-        caption = final_response["choices"][0]["message"].get("content", "")
+    await bot.send_chat_action(chat_id=message.chat_id, action=ChatAction.TYPING)
+
+    messages.append(assistant_message)
+    messages.append(
+        {
+            "role": "tool",
+            "tool_call_id": tool_call["id"],
+            "name": function_name,
+            "content": json.dumps(
+                {"url": media_url, "prompt": arguments.get("prompt", "")}
+            ),
+        }
+    )
+    final_response = await chat_completion(messages)
+    caption = final_response["choices"][0]["message"].get("content", "")
 
     # --- Отправляем результат ---
     if media_type == "image":
@@ -296,7 +289,7 @@ async def process_request(messages: list, message, reply: bool):
     else:
         await send(video_url=media_url, caption=caption)
 
-    # Можно удалить статусное сообщение "Генерирую...", если не нужно
+    # Удаляем статусное сообщение "Генерирую..."
     try:
         await status_msg.delete()
     except Exception:
