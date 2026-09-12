@@ -109,7 +109,9 @@ async def generate_image(prompt: str) -> str:
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 f"{API_BASE}/images/generations", headers=headers, json=payload
-            ) as resp:
+            ) == 200
+        ):
+            async with session.post(...) as resp:
                 data = await resp.json()
                 if resp.status != 200:
                     raise RuntimeError(data.get("error", data))
@@ -146,8 +148,10 @@ def quoted_content(msg) -> str:
 # ---------- Основная функция ----------
 
 async def do_request(messages, msg, reply=False):
+    # Подготовим базовый словарь kwargs один раз здесь
+    kwargs = {"reply_to_message_id": msg.message_id} if reply else {}
+
     async def send(text=None, image_url=None, cap=None):
-        kwargs = {"reply_to_message_id": msg.message_id} if reply else {}
 
         try:
             if image_url:
