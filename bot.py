@@ -2,6 +2,7 @@ import os
 import re
 import json
 import logging
+import traceback
 import aiohttp
 from telegram import Update
 from telegram.constants import ChatAction
@@ -27,73 +28,28 @@ VIDEO_MODEL = "seedance-2.0"
 
 SYSTEM_PROMPT = """Тебя зовут Роут. Ты — дружелюбный ИИ-ассистент в Telegram.
 
-Правила:
+Очень важно:
 - Отвечай на русском, если не просят иначе.
-- Если пользователь просит нарисовать изображение, картинку, фото, арт — вызови функцию generate_image.
-- Если пользователь просит сделать видео, ролик, клип, анимацию — вызови функцию generate_video.
-- Для генерации медиа составляй максимально подробный англоязычный промпт.
-- Если не просят генерировать медиа — отвечай обычным текстом."""
+- Если пользователь просит нарисовать, сгенерировать изображение, картинку, фото, арт — начни свой ответ с:
+  IMAGE: <подробный англоязычный промпт для генерации>
+- Если пользователь просит сделать видео, ролик, клип, анимацию — начни свой ответ с:
+  VIDEO: <подробный англоязычный промпт для генерации>
+- Если не просят генерировать медиа — просто отвечай текстом, без префиксов.
 
+Примеры:
+Пользователь: нарисуй слона
+Ты: IMAGE: A majestic African elephant standing in savanna at golden hour, highly detailed, photorealistic, 8k
 
-TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "generate_image",
-            "description": "Generate an image from a detailed text prompt. Use when the user asks for a picture, image, photo, drawing, or art.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "prompt": {
-                        "type": "string",
-                        "description": "Detailed English prompt for image generation",
-                    },
-                    "aspect_ratio": {
-                        "type": "string",
-                        "enum": ["1:1", "3:4", "4:3", "16:9", "9:16"],
-                        "default": "1:1",
-                        "description": "Aspect ratio of the generated image",
-                    },
-                },
-                "required": ["prompt"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "generate_video",
-            "description": "Generate a video from a detailed text prompt. Use when the user asks for a video, clip, animation, or movie.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "prompt": {
-                        "type": "string",
-                        "description": "Detailed English prompt for video generation",
-                    },
-                    "aspect_ratio": {
-                        "type": "string",
-                        "enum": ["1:1", "3:4", "4:3", "16:9", "9:16"],
-                        "default": "16:9",
-                        "description": "Aspect ratio of the generated video",
-                    },
-                    "duration": {
-                        "type": "integer",
-                        "enum": [5, 10],
-                        "default": 5,
-                        "description": "Duration of the video in seconds",
-                    },
-                },
-                "required": ["prompt"],
-            },
-        },
-    },
-]
+Пользователь: сделай видео про космос
+Ты: VIDEO: A cinematic flight through a colorful nebula with distant stars and planets, realistic space visuals, 4k
+
+Пользователь: привет
+Ты: Привет! Чем могу помочь?"""
 
 
 # ---------- API клиенты ----------
 
-async def chat_completion(messages, tools=None, tool_choice="none"):
+async def chat_completion(messages: list[dict]) -> str:
     headers = {
         "Authorization": f"Bearer {API_KEY}",
         "Content-Type": "application/json",
@@ -103,10 +59,6 @@ async def chat_completion(messages, tools=None, tool_choice="none"):
         "messages": [{"role": "system", "content": SYSTEM_PROMPT}] + messages,
         "temperature": 0.7,
     }
-    if tools:
-        payload["tools"] = tools
-        payload["tool_choice"] = tool_choice
-
     async with aiohttp.ClientSession() as session:
         async with session.post(
             f"{API_BASE}/chat/completions", headers=headers, json=payload
@@ -114,7 +66,7 @@ async def chat_completion(messages, tools=None, tool_choice="none"):
             data = await resp.json()
             if resp.status != 200:
                 raise RuntimeError(data.get("error", data))
-            return data
+            return data["choices"][0]["message"]["content"]
 
 
 async def generate_image(prompt: str, aspect_ratio: str = "1:1") -> str:
@@ -199,6 +151,16 @@ def build_user_content(message) -> str:
     return text
 
 
+def parse_media_command(text: str):
+    """Возвращает (type, prompt) или (None, text)"""
+    text = text.strip()
+    if text.upper().startswith("IMAGE:"):
+        return "image", text[6:].strip()
+    if text.upper().startswith("VIDEO:"):
+        return "video", text[6:].strip()
+    return None, text
+
+
 # ---------- Обработка запроса ----------
 
 async def process_request(messages: list, message, reply: bool):
@@ -226,62 +188,58 @@ async def process_request(messages: list, message, reply: bool):
 
     bot = message.get_bot()
 
-    # --- Этап 1: ИИ решает, что делать ---
+    # --- Этап 1: ИИ думает и отвечает ---
     await bot.send_chat_action(chat_id=message.chat_id, action=ChatAction.TYPING)
+    answer = await chat_completion(messages)
 
-    response = await chat_completion(messages, tools=TOOLS, tool_choice="auto")
-    assistant_message = response["choices"][0]["message"]
+    media_type, content = parse_media_command(answer)
 
-    # Обычный текстовый ответ
-    if not assistant_message.get("tool_calls"):
-        await send(text=assistant_message.get("content", "..."))
+    # --- Обычный текст ---
+    if not media_type:
+        await send(text=answer)
         return
 
-    tool_call = assistant_message["tool_calls"][0]
-    function_name = tool_call["function"]["name"]
-    arguments = json.loads(tool_call["function"]["arguments"])
-
-    # --- Этап 2: Генерация медиа ---
-    if function_name == "generate_image":
-        media_type = "image"
+    # --- Генерация медиа ---
+    if media_type == "image":
         action = ChatAction.UPLOAD_PHOTO
-        gen_text = "Генерирую фото..."
-    elif function_name == "generate_video":
-        media_type = "video"
-        action = ChatAction.UPLOAD_VIDEO
-        gen_text = "Генерирую видео..."
+        status_text = "Генерирую фото..."
     else:
-        await send(text="Неизвестная функция")
-        return
+        action = ChatAction.UPLOAD_VIDEO
+        status_text = "Генерирую видео..."
 
     status_msg = await message.reply_text(
-        gen_text,
+        status_text,
         reply_to_message_id=message.message_id if reply else None
     )
 
     await bot.send_chat_action(chat_id=message.chat_id, action=action)
 
-    if media_type == "image":
-        media_url = await generate_image(**arguments)
-    else:
-        media_url = await generate_video(**arguments)
+    try:
+        if media_type == "image":
+            media_url = await generate_image(content)
+        else:
+            media_url = await generate_video(content)
+    except Exception as e:
+        await status_msg.edit_text(f"Ошибка генерации: {e}")
+        return
 
-    # --- Этап 3: ИИ пишет подпись к результату ---
+    # --- Этап 2: ИИ пишет подпись ---
     await bot.send_chat_action(chat_id=message.chat_id, action=ChatAction.TYPING)
 
-    messages.append(assistant_message)
-    messages.append(
+    caption_messages = messages + [
+        {"role": "assistant", "content": answer},
         {
-            "role": "tool",
-            "tool_call_id": tool_call["id"],
-            "name": function_name,
-            "content": json.dumps(
-                {"url": media_url, "prompt": arguments.get("prompt", "")}
+            "role": "user",
+            "content": (
+                f"Медиа сгенерировано по запросу: {content}\n"
+                f"URL: {media_url}\n"
+                f"Напиши короткую подпись к этому медиа на русском языке. "
+                f"Не повторяй технические детали, просто естественный комментарий."
             ),
-        }
-    )
-    final_response = await chat_completion(messages)
-    caption = final_response["choices"][0]["message"].get("content", "")
+        },
+    ]
+    caption = await chat_completion(caption_messages)
+    caption = caption.replace("IMAGE:", "").replace("VIDEO:", "").strip()
 
     # --- Отправляем результат ---
     if media_type == "image":
@@ -289,7 +247,7 @@ async def process_request(messages: list, message, reply: bool):
     else:
         await send(video_url=media_url, caption=caption)
 
-    # Удаляем статусное сообщение "Генерирую..."
+    # Удаляем статусное сообщение
     try:
         await status_msg.delete()
     except Exception:
@@ -331,6 +289,7 @@ async def handle_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    traceback.print_exc()
     logging.error(f"Update {update} caused error: {context.error}", exc_info=context.error)
     if isinstance(update, Update) and update.message:
         try:
