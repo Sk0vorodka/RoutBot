@@ -241,30 +241,30 @@ async def process_request(messages: list, message, reply: bool):
     logger.info("Начало обработки запроса")
     
     async def send(text=None, image_url=None, video_url=None, caption=None):
-        caption = (caption or "")[:1000]
-        kwargs = {}
-        if reply:
-            kwargs["reply_to_message_id"] = message.message_id
+    caption = (caption or "")[:1000]
+    kwargs = {}
+    if reply:
+        kwargs["reply_to_message_id"] = message.message_id
 
-        try:
-            if image_url:
-                logger.info("Отправка изображения в Telegram")
-                await message.reply_photo(photo=image_url, caption=caption, **kwargs)
-            elif video_url:
-                logger.info("Отправка видео в Telegram")
-                await message.reply_video(video=video_url, caption=caption, **kwargs)
-            else:
-                logger.info("Отправка текстового сообщения в Telegram")
-                await message.reply_text(text or "...", **kwargs)
-        except Exception as media_error:
-            logger.error(f"Ошибка отправки в Telegram: {media_error}")
-            if image_url or video_url:
-                url = image_url or video_url
-                await message.reply_text(
-                    f"Готово: {url}\n\n{caption or ''}".strip(), **kwargs
-                )
-            else:
-                raise media_error
+    try:
+        if image_url:
+            logger.info("Отправка изображения в Telegram")
+            await message.reply_photo(photo=image_url, caption=caption, **kwargs)
+        elif video_url:
+            logger.info("Отправка видео в Telegram")
+            await message.reply_video(video=video_url, caption=caption, **kwargs)
+        else:
+            logger.info("Отправка текстового сообщения в Telegram")
+            await message.reply_text(text or "...", **kwargs)
+    except Exception as media_error:
+        logger.error(f"Ошибка отправки в Telegram: {media_error}")
+        if image_url or video_url:
+            url = image_url or video_url
+            await message.reply_text(
+                f"Готово: {url}\n\n{caption or ''}".strip(), **kwargs
+            )
+        else:
+            raise media_error
 
     bot = message.get_bot()
 
