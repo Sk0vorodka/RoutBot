@@ -3,7 +3,6 @@ import os
 import re
 import json
 import logging
-import subprocess
 import aiohttp
 from telegram import Update
 from telegram.constants import ChatAction
@@ -15,6 +14,7 @@ from telegram.ext import (
     ContextTypes,
 )
 from dotenv import load_dotenv
+from io import BytesIO
 
 # Логирование
 logging.basicConfig(
@@ -47,7 +47,7 @@ SYSTEM_PROMPT = """Ты Роут. Дружелюбный ИИ в Telegram.
 - Если просят фото, начни с: IMAGE: <английский промпт>
 - Иначе отвечай просто текстом."""
 
-# ---------- API клиента ----------
+# ---------- API клиент ----------
 
 async def chat_completion(messages: list[dict]) -> str:
     headers = {
@@ -151,12 +151,22 @@ async def do_request(messages, msg, reply=False):
 
         try:
             if image_url:
-                await msg.reply_photo(photo=image_url, caption=cap or "", **kwargs)
+                # Скачиваем картинку и отправляем как InputFile
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(image_url) as resp:
+                        if resp.status == 200:
+                            image_data = await resp.read()
+                            file_like = BytesIO(image_data)
+                            file_like.name = "image.png"
+                            await msg.reply_photo(photo=file_like, caption=cap or "", **kwargs)
+                        else:
+                            await msg.reply_text(f"🖼️ Вот твоя картинка: {image_url}\n\nПодпись: {cap or ''}", **kwargs)
             else:
                 await msg.reply_text(text or "...", **kwargs)
-        except Exception:
-            fallback_text = f"Готово: {image_url}" + (("\n\n" + cap) if cap else "")
-            await msg.reply_text(fallback_text[:1000], **kwargs)
+        except Exception as e:
+            logger.error(f"send() ошибка: {str(e)}", exc_info=True)
+            fallback = f"Готово: {image_url}" + (("\n\n" + cap) if cap else "")
+            await msg.reply_text(fallback[:1000], **kwargs)
 
     bot = msg.get_bot()
     await bot.send_chat_action(chat_id=msg.chat_id, action=ChatAction.TYPING)
@@ -169,12 +179,12 @@ async def do_request(messages, msg, reply=False):
             await send(text=answer)
             return
 
-        st = await msg.reply_text("Генерирую фото...", reply_to_message_id=msg.message_id if reply else None)
+        st = await msg.reply_text("Генерирую фото...", **kwargs)
         await bot.send_chat_action(chat_id=msg.chat_id, action=ChatAction.UPLOAD_PHOTO)
+
         url = await generate_image(prm)
 
-        # Подпись
-        cprm = "Напиши короткий коммент на русском"
+        cprm = "Кратко подпиши это изображение (до 200 символов)"
         crsp = await chat_completion(messages + [
             {"role": "assistant", "content": answer},
             {"role": "user", "content": cprm},
@@ -186,8 +196,7 @@ async def do_request(messages, msg, reply=False):
 
     except Exception as e:
         logger.error(f"do_request ошибка: {e}", exc_info=True)
-        kwargs = {"reply_to_message_id": msg.message_id} if reply else {}
-        await msg.reply_text("Ошибка. Попробуй позже.", **kwargs)
+        await msg.reply_text("Произошла внутренняя ошибка. Попробуйте снова.", **kwargs)
 
 
 # ---------- Хендлеры ----------
@@ -200,7 +209,7 @@ async def logs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         await update.message.reply_document(document=open("bot.log", "rb"))
     except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка: {e}")
+        await update.message.reply_text(f"❌ Ошибка чтения логов: {e}")
 
 
 async def handle_private(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
