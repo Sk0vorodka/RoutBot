@@ -37,26 +37,19 @@ BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
 TEXT_MODEL = "gpt-5-6-luna"
 IMAGE_MODEL = "qwen-image-2.0-pro"
-VIDEO_MODEL = "seedance-2.0"
 
-if not BOT_TOKEN:
-    logger.error("Отсутствует TELEGRAM_BOT_TOKEN в .env")
-    exit(1)
-if not API_KEY:
-    logger.error("Отсутствует CRAX_API_KEY в .env")
+if not BOT_TOKEN or not API_KEY:
+    logger.error("Нужны TELEGRAM_BOT_TOKEN и CRAX_API_KEY")
     exit(1)
 
-SYSTEM_PROMPT = """Тебя зовут Роут. Ты — дружелюбный ИИ-ассистент в Telegram.
+SYSTEM_PROMPT = """Ты Роут. Дружелюбный ИИ в Telegram.
 
-Очень важно:
-- Отвечай на русском, если не просят иначе.
-- Если пользователь просит нарисовать, сгенерировать изображение, картинку, фото, арт — начни свой ответ с:
-  IMAGE: <подробный англоязычный промпт для генерации>
-- Если пользователь просит сделать видео, ролик, клип, анимацию — начни свой ответ с:
-  VIDEO: <подробный англоязычный промпт для генерации>
-- Если не просят генерировать медиа — просто отвечай текстом, без префиксов."""
+Правила:
+- Отвечай по-русски.
+- Если просят фото, начни с: IMAGE: <английский промпт>
+- Иначе отвечай просто текстом."""
 
-# ---------- API клиенты ----------
+# ---------- API клиента ----------
 
 async def chat_completion(messages: list[dict]) -> str:
     headers = {
@@ -122,8 +115,7 @@ async def generate_image(prompt: str) -> str:
                 data = await resp.json()
                 if resp.status != 200:
                     raise RuntimeError(data.get("error", data))
-                url = data["data"][0]["url"]
-                return url
+                return data["data"][0]["url"]
     except Exception as e:
         logger.error(f"Ошибка генерации изображения: {e}")
         raise
@@ -131,153 +123,120 @@ async def generate_image(prompt: str) -> str:
 
 # ---------- Вспомогательные функции ----------
 
-def is_route_mentioned(text: str, bot_username: str) -> bool:
-    if not text:
-        return False
-    lower = text.lower()
-    if f"@{bot_username.lower()}" in lower:
-        return True
-    if re.search(r"(?<!\w)роут(?!\w)", lower):
-        return True
-    return False
-
-
-def build_user_content(message) -> str:
-    text = message.text or ""
-    if message.reply_to_message and message.reply_to_message.text:
-        return (
-            f"[Цитата]: {message.reply_to_message.text}\n"
-            f"{text}"
-        )
-    return text
-
-
-def parse_media_cmd(text: str):
+def parse_cmd(text: str):
     text = text.strip()
     if text.upper().startswith("IMAGE:"):
         return "image", text[6:].strip()
-    if text.upper().startswith("VIDEO:"):
-        return "video", text[6:].strip()
     return None, text
 
 
-# ---------- Основная логика ----------
+def mentioned_in(text: str, bot_username: str) -> bool:
+    if not text:
+        return False
+    t = text.lower()
+    return f"@{bot_username.lower()}" in t or re.search(r"\bроут\b", t)
 
-async def process_request(messages, message, reply=False):
-    async def send(text=None, image_url=None, caption=None):
-        kwargs = {"reply_to_message_id": message.message_id} if reply else {}
+
+def quoted_content(msg) -> str:
+    txt = msg.text or ""
+    if msg.reply_to_message:
+        repl = msg.reply_to_message.text or "[медиа]"
+        return f"[Цитата: {repl}]\n{txt}"
+    return txt
+
+
+# ---------- Основная функция ----------
+
+async def do_request(messages, msg, reply=False):
+    async def send(text=None, image_url=None, cap=None):
+        kw = {"reply_to_message_id": msg.message_id} if reply else {}
 
         try:
             if image_url:
-                await message.reply_photo(photo=image_url, caption=caption or "", **kwargs)
+                await msg.reply_photo(photo=image_url, caption=cap or "", **kw)
             else:
-                await message.reply_text(text or "...", **kwargs)
+                await msg.reply_text(text or "...", **kw)
         except Exception:
-            fallback = f"Готово: {image_url}" + (("\n\n" + caption) if caption else "")
-            await message.reply_text(fallback[:1000], **kwargs)
+            fb = f"Готово: {image_url}" + (("\n\n" + cap) if cap else "")
+            await msg.reply_text(fb[:1000], **kw)
 
-    bot = message.get_bot()
-    await bot.send_chat_action(chat_id=message.chat_id, action=ChatAction.TYPING)
+    bot = msg.get_bot()
+    await bot.send_chat_action(chat_id=msg.chat_id, action=ChatAction.TYPING)
 
     try:
-        response = await chat_completion(messages)
-        media_type, prompt = parse_media_cmd(response)
+        answer = await chat_completion(messages)
+        typ, prm = parse_cmd(answer)
 
-        if not media_type:
-            await send(text=response)
+        if not typ:
+            await send(text=answer)
             return
 
-        status = await message.reply_text(
-            "Генерирую фото..." if media_type == "image" else "Генерирую видео...",
-            **({"reply_to_message_id": message.message_id} if reply else {})
-        )
+        st = await msg.reply_text("Генерирую фото...", **kw)
+        await bot.send_chat_action(chat_id=msg.chat_id, action=ChatAction.UPLOAD_PHOTO)
+        url = await generate_image(prm)
 
-        await bot.send_chat_action(
-            chat_id=message.chat_id,
-            action=ChatAction.UPLOAD_PHOTO if media_type == "image" else ChatAction.UPLOAD_VIDEO
-        )
-
-        if media_type == "image":
-            media_url = await generate_image(prompt)
-        else:
-            await send(text=f"Видео: {prompt}")
-            await status.delete()
-            return
-
-        cap_prompt = "Напиши короткую подпись на русском"
-        caption_resp = await chat_completion(messages + [
-            {"role": "assistant", "content": response},
-            {"role": "user", "content": cap_prompt},
+        cprm = "Напиши короткий коммент на русском"
+        crsp = await chat_completion(messages + [
+            {"role": "assistant", "content": answer},
+            {"role": "user", "content": cprm},
         ])
-        caption = caption_resp.replace("IMAGE:", "").replace("VIDEO:", "").strip()
+        c = crsp.replace("IMAGE:", "").strip()
 
-        await send(image_url=media_url, caption=caption)
-        await status.delete()
+        await send(image_url=url, cap=c)
+        await st.delete()
 
     except Exception as e:
-        logger.error(f"Ошибка при обработке запроса: {e}", exc_info=True)
-        await message.reply_text("Произошла ошибка. Попробуй позже.", reply_to_message_id=message.message_id if reply else None)
+        logger.error(f"Ошибка при обработке: {e}", exc_info=True)
+        await msg.reply_text("Ошибка. Попробуй позже.", **kw)
 
 
-# ---------- Команды Telegram ----------
+# ---------- Хендлеры ----------
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Привет! Напиши что-то.")
 
 
-async def send_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def logs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
-        res = subprocess.run(["tail", "-n", "20", "bot.log"], capture_output=True, text=True)
-        text = res.stdout or "пусто"
-        await update.message.reply_text(f"```\n{text[-3000:]}\n```", parse_mode="Markdown")
+        r = subprocess.run(["tail", "-n", "20", "bot.log"], capture_output=True, text=True)
+        t = r.stdout or "пусто"
+        await update.message.reply_text(f"```\n{t[-3000:]}\n```", parse_mode="Markdown")
     except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка чтения логов: {e}")
+        await update.message.reply_text(f"❌ Ошибка: {e}")
 
 
-async def private(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_private(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg or not msg.text:
         return
-    await process_request(
-        [{"role": "user", "content": build_user_content(msg)}],
-        msg,
-        reply=False
-    )
+    await do_request([{"role": "user", "content": quoted_content(msg)}], msg, False)
 
 
-async def group(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_group(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg or not msg.text:
         return
-    bot_uname = context.bot.username
-    if not is_route_mentioned(msg.text, bot_uname):
+    un = ctx.bot.username
+    if not mentioned_in(msg.text, un):
         return
-    await process_request(
-        [{"role": "user", "content": build_user_content(msg)}],
-        msg,
-        reply=True
-    )
+    await do_request([{"role": "user", "content": quoted_content(msg)}], msg, True)
 
 
-async def reply_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg.reply_to_message or not msg.reply_to_message.from_user:
         return
     if msg.reply_to_message.from_user.is_bot:
-        await process_request(
-            [{"role": "user", "content": build_user_content(msg)}],
-            msg,
-            reply=True
-        )
+        await do_request([{"role": "user", "content": quoted_content(msg)}], msg, True)
 
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("logs", send_logs))
-    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT, private))
-    app.add_handler(MessageHandler(filters.ChatType.GROUPS & filters.TEXT, group))
-    app.add_handler(MessageHandler(filters.REPLY & filters.TEXT, reply_handler))
+    app.add_handler(CommandHandler("logs", logs))
+    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT, handle_private))
+    app.add_handler(MessageHandler(filters.ChatType.GROUPS & filters.TEXT, handle_group))
+    app.add_handler(MessageHandler(filters.REPLY & filters.TEXT, handle_reply))
     app.run_polling()
 
 
