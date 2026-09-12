@@ -1,0 +1,37 @@
+<!-- index.html -->
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Логи бота</title>
+  <style>
+    body {
+      font-family: monospace;
+      background: #1e1e1e;
+      color: #ccc;
+      padding: 1rem;
+    }
+    pre {
+      background: #2d2d2d;
+      padding: 1rem;
+      border-radius: 4px;
+      overflow-x: auto;
+    }
+  </style>
+</head>
+<body>
+  <h2>Логи бота 🟢</h2>
+  <pre id="logs">загрузка...</pre>
+
+  <script>
+    async function fetchLogs() {
+      const r = await fetch('/api/logs');
+      const d = await r.text();
+      document.getElementById('logs').textContent = d || 'пусто';
+    }
+
+    setInterval(fetchLogs, 2000);
+    fetchLogs();
+  </script>
+</body>
+</html>
